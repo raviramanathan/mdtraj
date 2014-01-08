@@ -58,16 +58,17 @@ cdef extern from "math.h":
 # External (Public) Functions
 ##############################################################################
 
-def rmsd(target, reference, frame=0, atom_indices=None, parallel=True):
-    """rmsd(target, reference, frame=0, atom_indices=None, parallel=True)
-    
+def rmsd(target, reference, int frame=0, atom_indices=None, bool parallel=True, bool precentered=False):
+    """rmsd(target, reference, frame=0, atom_indices=None, parallel=True, precentered=False)
+
     Compute RMSD of all conformations in target to a reference conformation.
+    Note, this will center the conformations in place.
 
     Parameters
     ----------
     target : md.Trajectory
         For each conformation in this trajectory, compute the RMSD to
-        a particular 'reference' conformation in another trajectory 
+        a particular 'reference' conformation in another trajectory
         object.
     reference : md.Trajectory
         The object containing the reference conformation to measure distances
@@ -80,7 +81,33 @@ def rmsd(target, reference, frame=0, atom_indices=None, parallel=True):
         supplied, all atoms will be used.
     parallel : bool
         Use OpenMP to calculate each of the RMSDs in parallel over
-        multiple cores
+        multiple cores.
+    precentered : bool, default=False
+        Assume that the conformations are already centered at the origin, and that
+        the "rmsd_traces" have been computed, as is done by
+        `Trajectory.center_coordinates`. The "rmsd_traces" are intermediate
+        calculations needed for the RMSD calculation which can be computed
+        independently on each trajectory. Note that this has the potential to
+        be unsafe; if you use Trajectory.center_coordinates and then modify
+        the trajectory's coordinates, the center and traces will be out of
+        date and the RMSDs will be incorrect.
+
+    Examples
+    --------
+    >>> import mdtraj as md                                      # doctest: +SKIP
+    >>> rmsds = md.rmsd(trajectory, trajectory, 0)               # doctest: +SKIP
+    >>> print rmdsds                                             # doctest: +SKIP
+    array([ 0.0,  0.03076187,  0.02549562, ...,  0.06230228,
+        0.00666826,  0.24364147])
+
+    The calculation is slightly faster if you precenter the trajectory
+
+    >>> trajectory.center_coordinates()
+    >>> rmsds = md.rmsd(trajectory, trajectory, 0, precentered=True)
+
+    See Also
+    --------
+    Trajectory.center_coordinates
 
     Notes
     -----
@@ -90,35 +117,69 @@ def rmsd(target, reference, frame=0, atom_indices=None, parallel=True):
 
     Returns
     -------
-    rmsds : np.ndarray, shape=(n_frames,)
-        A 1-D numpy array of the optimal root-mean-square deviations.
+    rmsds : np.ndarray, shape=(target.n_frames,)
+        A 1-D numpy array of the optimal root-mean-square deviations from
+        the `frame`-th conformation in reference to each of the conformations
+        in target.
     """
-    #import time
-
+    # import time
     if atom_indices is None:
         atom_indices = slice(None)
 
-    cdef np.ndarray[ndim=3, dtype=np.float32_t] target_xyz = np.asarray(target.xyz[:, atom_indices, :], order='c', dtype=np.float32)
-    cdef np.ndarray[ndim=3, dtype=np.float32_t] ref_xyz = np.asarray(reference.xyz[frame, atom_indices, :], order='c', dtype=np.float32).reshape(1, -1, 3)
-    cdef np.ndarray[ndim=1, dtype=np.float32_t] target_g = np.empty(target_xyz.shape[0], dtype=np.float32)
-    cdef np.ndarray[ndim=1, dtype=np.float32_t] ref_g = np.empty(1, dtype=np.float32)
+    # Error checks
+    assert (target.xyz.ndim == 3) and (reference.xyz.ndim == 3) and (target.xyz.shape[2]) == 3 and (reference.xyz.shape[2] == 3)
+    if not (target.xyz.shape[1]  == reference.xyz.shape[1]):
+        raise ValueError("Input trajectories must have same number of atoms. "
+                         "found %d and %d." % (target.xyz.shape[1], reference.xyz.shape[1]))
+    if frame >= reference.xyz.shape[0]:
+        raise ValueError("Cannot calculate RMSD of frame %d: reference has "
+                         "only %d frames." % (frame, reference.xyz.shape[0]))
 
-    inplace_center_and_trace_atom_major(&target_xyz[0,0,0], &target_g[0], target_xyz.shape[0], target_xyz.shape[1])
-    inplace_center_and_trace_atom_major(&ref_xyz[0,0,0], &ref_g[0], 1, ref_xyz.shape[1])
+    # static declarations
+    cdef int i
+    cdef float msd, ref_g
+    cdef np.ndarray[ndim=3, dtype=np.float32_t] target_xyz
+    cdef np.ndarray[ndim=2, dtype=np.float32_t] ref_xyz_frame
+    cdef np.ndarray[ndim=1, dtype=np.float32_t] target_g
+    cdef int target_n_frames = target.xyz.shape[0]
+    cdef int n_atoms = target.xyz.shape[1]
 
-    # target_xyz -= target_xyz.mean(axis=1, dtype=np.float64, keepdims=True)[0]
-    # ref_xyz[0] -= (ref_xyz[0].astype('float64').mean(0))
-    # target_g = np.einsum('ijk,ijk->i', target_xyz, target_xyz)
-    # ref_g = np.einsum('ijk,ijk->i', ref_xyz , ref_xyz)
+    # make sure *every* frame in target_xyz is in proper c-major order
+    target_xyz = np.asarray(target.xyz[:, atom_indices, :], order='c', dtype=np.float32)
+    # only extract the `frame`-th conformation from ref_xyz
+    ref_xyz_frame = np.asarray(reference.xyz[frame, atom_indices, :], order='c', dtype=np.float32)
 
-    distances =  getMultipleRMSDs_atom_major(
-                    ref_xyz, target_xyz, ref_g, target_g, 0, parallel=parallel)
+    # t0 = time.time()
+    if precentered and (reference._rmsd_traces is not None) and (target._rmsd_traces is not None) and atom_indices == slice(None):
+        target_g = np.asarray(target._rmsd_traces, order='c', dtype=np.float32)
+        ref_g = reference._rmsd_traces[frame]
+    else:
+        target_g = np.empty(target_n_frames, dtype=np.float32)
+        inplace_center_and_trace_atom_major(&target_xyz[0,0,0], &target_g[0], target_n_frames, n_atoms)
+        inplace_center_and_trace_atom_major(&ref_xyz_frame[0, 0], &ref_g, 1, n_atoms)
+
+    # t1 = time.time()
+
+    cdef np.ndarray[dtype=np.float32_t, ndim=1] distances = np.zeros(target_n_frames, dtype=np.float32)
+    if parallel:
+        for i in prange(target_n_frames, nogil=True):
+            msd = msd_atom_major(n_atoms, n_atoms, &target_xyz[i, 0, 0], &ref_xyz_frame[0, 0], target_g[i], ref_g, 0, NULL)
+            distances[i] = sqrtf(msd)
+    else:
+        for i in range(target_n_frames):
+            msd = msd_atom_major(n_atoms, n_atoms, &target_xyz[i, 0, 0], &ref_xyz_frame[0, 0], target_g[i], ref_g, 0, NULL)
+            distances[i] = sqrtf(msd)
+
+    # t2 = time.time()
+    # print 'rmsd: %s, centering: %s' % (t2-t1, t1-t0)
     return distances
 
 
 def _center_inplace_atom_major(np.ndarray[ndim=3, dtype=np.float32_t] xyz not None):
     assert xyz.shape[2] == 3
-    inplace_center_and_trace_atom_major(&xyz[0,0,0], NULL, xyz.shape[0], xyz.shape[1])
+    cdef np.ndarray[ndim=1, dtype=np.float32_t] traces = np.empty(xyz.shape[0], dtype=np.float32)
+    inplace_center_and_trace_atom_major(&xyz[0,0,0], &traces[0], xyz.shape[0], xyz.shape[1])
+    return traces
 
 
 

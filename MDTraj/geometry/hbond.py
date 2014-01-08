@@ -64,6 +64,31 @@ def baker_hubbard(traj, freq=0.1, exclude_water=True):
     -----
     .. [1] Baker, E. N., and R. E. Hubbard. "Hydrogen bonding in globular proteins." Progress in Biophysics and Molecular Biology 44.2 (1984): 97-179.
 
+    Examples
+    --------
+    >>> md.baker_hubbard(t)                                    # doctest: +SKIP
+    array([[  0,  10,   8],
+           [  0,  11,   7],
+           [ 69,  73,  54],
+           [ 76,  82,  65],
+           [119, 131,  89],
+           [140, 148, 265],
+           [166, 177, 122],
+           [181, 188, 231]])
+    >>> label = lambda hbond : '%s -- %s' % (t.topology.atom(hbond[0]), t.topology.atom(hbond[2]))  # doctest: +SKIP
+    >>> for hbond in hbonds:                                    # doctest: +SKIP
+    >>>     print label(hbond)                                  # doctest: +SKIP
+    GLU1-N -- GLU1-OE2 
+    GLU1-N -- GLU1-OE1
+    GLY6-N -- SER4-O
+    CYS7-N -- GLY5-O
+    TYR11-N -- VAL8-O
+    MET12-N -- LYS20-O
+
+    See Also
+    --------
+    kabsch_sander
+
     Returns
     -------
     hbonds : np.array, shape=[n_hbonds, 3], dtype=int
@@ -155,6 +180,10 @@ def kabsch_sander(traj):
         Kabsch-Sander energy is less than -0.5 kcal/mol (the threshold for
         existence of the "bond"). The exact value of the energy is given by the
         value `x`.
+
+    See Also
+    --------
+    baker_hubbard
 
     References
     ----------
